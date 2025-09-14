@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="et">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Signatuuri generaator (Owner-only, offline)</title>
+<style>
+  :root{--bg:#0b0e14;--fg:#eaeef3;--panel:#121826;--line:#2a3243;--acc:#49a0ff}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
+  .wrap{max-width:980px;margin:24px auto;padding:0 16px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+  h1{font-size:20px;margin:0 0 12px}
+  h2{font-size:16px;margin:16px 0 8px}
+  label{font-size:13px;opacity:.95}
+  input,select,textarea,button{background:#0c1220;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px}
+  textarea{width:100%;min-height:100px}
+  .row{display:flex;gap:8px;flex-wrap:wrap}
+  .row > *{flex:1}
+  .muted{opacity:.8}
+  .danger{color:#ff7a7a}
+  .ok{color:#79e0a8}
+  .btn{background:var(--acc);border:0;color:#fff;cursor:pointer}
+  .btn.ghost{background:#0000;border:1px solid var(--line)}
+  .grid{display:grid;grid-template-columns:1fr;gap:12px}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;white-space:pre-wrap}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Signatuuri generaator (Owner-only)</h1>
+      <div class="muted">Loo võtmed lokaalselt, allkirjasta sõnum, salvesta privaatvõti USB‑le. See töötab offline ja ei saada andmeid kuhugi.</div>
+    </div>
+
+    <div class="card">
+      <h2>1) Võtmeparameetrid ja generatsioon</h2>
+      <div class="row">
+        <div>
+          <label>Algoritm</label>
+          <select id="alg">
+            <option value="ECDSA-P256">ECDSA P-256 (SHA-256, soovitus)</option>
+            <option value="RSA-PSS-2048">RSA-PSS 2048 (SHA-256)</option>
+          </select>
+        </div>
+        <div>
+          <label>Omaniku nimi (info)</label>
+          <input id="ownerName" placeholder="SinuNimi"/>
+        </div>
+      </div>
+      <div class="row">
+        <button id="btnGen" class="btn">Genereeri võtmepaar</button>
+        <button id="btnWipe" class="btn ghost">Kustuta mälust (wipe)</button>
+      </div>
+      <div id="genStatus" class="muted"></div>
+    </div>
+
+    <div class="card">
+      <h2>2) Võtmete eksport / salvestus</h2>
+      <div class="row">
+        <button id="btnExportPriv" class="btn">Laadi alla privaatvõti (.pem)</button>
+        <button id="btnExportPub" class="btn ghost">Laadi alla avalik võti (.pem)</button>
+      </div>
+      <div class="muted">Privaatvõti on ÜLI SALAJANE. Hoia USB‑l või offline kettal. Ära laadi seda kuhugi üles.</div>
+      <div class="grid">
+        <div>
+          <label>Privaatvõti (PEM, eelvaade)</label>
+          <textarea id="privPem" class="mono" readonly></textarea>
+        </div>
+        <div>
+          <label>Avalik võti (PEM)</label>
+          <textarea id="pubPem" class="mono" readonly></textarea>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>3) Allkirjasta sõnum</h2>
+      <div class="grid">
+        <div>
+          <label>Sõnum (nt: owner:[nimi])</label>
+          <input id="msg" value="owner:"/>
+        </div>
+        <div class="row">
+          <button id="btnSign" class="btn">Allkirjasta</button>
+          <button id="btnVerify" class="btn ghost">Kontrolli allkirja</button>
+        </div>
+        <div>
+          <label>Signatuur (Base64)</label>
+          <textarea id="sig" class="mono" readonly></textarea>
+        </div>
+        <div id="verifyStatus"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>4) Omaniku avaliku võtme fail mängule</h2>
+      <div class="muted">Kopeeri see faili <b>omaniku-võti.js</b> (mäng loeb selle ja kontrollib sinu allkirja).</div>
+      <textarea id="ownerJs" class="mono" readonly></textarea>
+      <div class="row">
+        <button id="btnDownloadOwnerJs" class="btn ghost">Laadi alla omaniku-võti.js</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Turvanõuanded</h2>
+      <ul>
+        <li>Ära jaga privaatvõtit. Hoia USB‑l/offline.</li>
+        <li>Allkirjasta ainult lokaalselt. Mängule edasta ainult signatuur (mitte privaatvõti).</li>
+        <li>Võid teha varukoopia teisele USB‑le ja hoida teises kohas.</li>
+      </ul>
+    </div>
+  </div>
+
+<script>
+let keyPair = null;
+let algo = null;
+
+const $ = id => document.getElementById(id);
+const ab2b64 = ab => btoa(String.fromCharCode(...new Uint8Array(ab)));
+const b642ab = b64 => Uint8Array.from(atob(b64), c=>c.charCodeAt(0)).buffer;
+const str2ab = s => new TextEncoder().encode(s);
+function download(name, text){ const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([text],{type:'text/plain'})); a.download=name; a.click(); }
+
+function pemWrap(type, b64){
+  const lines = b64.match(/.{1,64}/g).join('\n');
+  return `-----BEGIN ${type}-----\n${lines}\n-----END ${type}-----`;
+}
+
+async function exportPrivPem(){
+  if (!keyPair) return '';
+  if (algo.name==='ECDSA'){
+    const pkcs8 = await crypto.subtle.exportKey('pkcs8', keyPair.privateKey);
+    return pemWrap('PRIVATE KEY', ab2b64(pkcs8));
+  } else { // RSA-PSS
+    const pkcs8 = await crypto.subtle.exportKey('pkcs8', keyPair.privateKey);
+    return pemWrap('PRIVATE KEY', ab2b64(pkcs8));
+  }
+}
+async function exportPubPem(){
+  if (!keyPair) return '';
+  if (algo.name==='ECDSA'){
+    const spki = await crypto.subtle.exportKey('spki', keyPair.publicKey);
+    return pemWrap('PUBLIC KEY', ab2b64(spki));
+  } else { // RSA-PSS
+    const spki = await crypto.subtle.exportKey('spki', keyPair.publicKey);
+    return pemWrap('PUBLIC KEY', ab2b64(spki));
+  }
+}
+
+function getAlgo(selection){
+  if (selection==='ECDSA-P256'){
+    return { name:'ECDSA', namedCurve:'P-256', hash:{name:'SHA-256'} };
+  } else {
+    return { name:'RSA-PSS', modulusLength:2048, publicExponent:new Uint8Array([1,0,1]), hash:'SHA-256', saltLength:32 };
+  }
+}
+
+$('btnGen').onclick = async ()=>{
+  try{
+    const sel = $('alg').value;
+    algo = getAlgo(sel);
+    if (algo.name==='ECDSA'){
+      keyPair = await crypto.subtle.generateKey(
+        { name:'ECDSA', namedCurve:'P-256' },
+        true, ['sign','verify']
+      );
+    } else {
+      keyPair = await crypto.subtle.generateKey(
+        { name:'RSA-PSS', modulusLength:2048, publicExponent:new Uint8Array([1,0,1]), hash:'SHA-256' },
+        true, ['sign','verify']
+      );
+    }
+    $('genStatus').textContent = 'Võtmepaar loodud (mälu). Ekspordi ja salvesta kohe USB‑le.';
+    $('privPem').value = await exportPrivPem();
+    $('pubPem').value = await exportPubPem();
+    fillOwnerJs();
+  }catch(e){
+    $('genStatus').textContent = 'Viga võtmete loomisel: '+e.message;
+  }
+};
+
+$('btnWipe').onclick = ()=>{
+  keyPair = null; algo = null;
+  $('genStatus').textContent = 'Mälu puhastatud. (Failid, mida salvestasid, jäävad alles.)';
+  $('privPem').value = ''; $('pubPem').value=''; $('sig').value=''; $('verifyStatus').textContent='';
+  $('ownerJs').value='';
+};
+
+$('btnExportPriv').onclick = async ()=>{
+  if (!keyPair) return alert('Loo enne võtmed');
+  const pem = await exportPrivPem();
+  download('owner-private-key.pem', pem);
+};
+$('btnExportPub').onclick = async ()=>{
+  if (!keyPair) return alert('Loo enne võtmed');
+  const pem = await exportPubPem();
+  download('owner-public-key.pem', pem);
+};
+
+$('btnSign').onclick = async ()=>{
+  if (!keyPair) return alert('Loo enne võtmed');
+  const message = $('msg').value || '';
+  try{
+    let signature;
+    if (algo.name==='ECDSA'){
+      signature = await crypto.subtle.sign({name:'ECDSA', hash:{name:'SHA-256'}}, keyPair.privateKey, str2ab(message));
+    } else {
+      signature = await crypto.subtle.sign({name:'RSA-PSS', saltLength:32}, keyPair.privateKey, str2ab(message));
+    }
+    $('sig').value = ab2b64(signature);
+    $('verifyStatus').innerHTML = '<span class="ok">Allkiri loodud. Proovi ka Verify.</span>';
+  }catch(e){
+    $('verifyStatus').innerHTML = '<span class="danger">Allkirja loomise viga: '+e.message+'</span>';
+  }
+};
+
+$('btnVerify').onclick = async ()=>{
+  if (!keyPair) return alert('Loo enne võtmed');
+  const message = $('msg').value || '';
+  const sigB64 = $('sig').value.trim();
+  if (!sigB64) return alert('Pole signatuuri');
+  try{
+    let ok;
+    if (algo.name==='ECDSA'){
+      ok = await crypto.subtle.verify({name:'ECDSA', hash:{name:'SHA-256'}}, keyPair.publicKey, b642ab(sigB64), str2ab(message));
+    } else {
+      ok = await crypto.subtle.verify({name:'RSA-PSS', saltLength:32}, keyPair.publicKey, b642ab(sigB64), str2ab(message));
+    }
+    $('verifyStatus').innerHTML = ok ? '<span class="ok">Allkiri kehtib ✔</span>' : '<span class="danger">Allkiri EI kehti ✖</span>';
+  }catch(e){
+    $('verifyStatus').innerHTML = '<span class="danger">Verify viga: '+e.message+'</span>';
+  }
+};
+
+function fillOwnerJs(){
+  const pubPem = $('pubPem').value.trim();
+  const name = $('ownerName').value.trim() || 'Owner';
+  const alg = $('alg').value;
+  const js = `// omaniku-võti.js (automaatselt genereeritud)
+// Hoia avalik võti mängus. Privaatvõtit ÄRA lisa siia faili.
+
+export const OmanikuVõti = {
+  ownerName: ${JSON.stringify(name)},
+  algorithm: ${JSON.stringify(alg)},
+  publicKeyPem: \`${pubPem}\`
+};`;
+  $('ownerJs').value = js;
+}
+$('ownerName').addEventListener('input', fillOwnerJs);
+$('alg').addEventListener('change', fillOwnerJs);
+$('btnDownloadOwnerJs').onclick = ()=> download('omaniku-võti.js', $('ownerJs').value);
+</script>
+</body>
+</html>
